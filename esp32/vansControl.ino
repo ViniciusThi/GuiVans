@@ -3,7 +3,7 @@
 #include <ArduinoJson.h>
 #include <SPI.h>
 #include <MFRC522.h>
-#include <WebSocketsClient.h>
+#include <WebSocketsClient_Generic.h>
 
 // Configurações de Hardware
 #define SS_PIN 21
@@ -42,8 +42,9 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
   
-  Serial.println("=== VansControl ESP32 v2.0 ===");
+  Serial.println("=== VansControl ESP32 v2.1 ===");
   Serial.println("Inicializando sistema...");
+  Serial.println("Usando WebSocketsClient_Generic");
   
   // Configurar pinos
   pinMode(LED_VERDE, OUTPUT);
@@ -155,63 +156,138 @@ void loop() {
 }
 
 void configurarWebSocket() {
-  Serial.println("Configurando WebSocket...");
+  Serial.println("Configurando WebSocket Generic...");
   
-  webSocket.begin(websocketHost, websocketPort, "/socket.io/?EIO=4&transport=websocket");
+  // Configurar WebSocket com Socket.IO
+  webSocket.beginSocketIO(websocketHost, websocketPort, "/socket.io/?EIO=4&transport=websocket");
+  
+  // Configurar eventos
   webSocket.onEvent(webSocketEvent);
-  webSocket.setReconnectInterval(5000);
   
-  Serial.println("WebSocket configurado");
+  // Configurar reconexão automática
+  webSocket.setReconnectInterval(5000);
+  webSocket.enableHeartbeat(15000, 3000, 2);
+  
+  Serial.println("WebSocket Generic configurado");
 }
 
 void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
   switch(type) {
     case WStype_DISCONNECTED:
-      Serial.println("WebSocket Desconectado");
+      Serial.println("[WSc] WebSocket Desconectado");
       websocketConnected = false;
       break;
       
     case WStype_CONNECTED:
-      Serial.printf("WebSocket Conectado: %s\n", payload);
+      Serial.printf("[WSc] WebSocket Conectado: %s\n", payload);
       websocketConnected = true;
       
       // Enviar identificação do ESP32
-      DynamicJsonDocument doc(512);
-      doc["esp32Id"] = ESP32_ID;
-      doc["type"] = "esp32_connected";
-      doc["timestamp"] = millis();
-      
-      String message;
-      serializeJson(doc, message);
-      webSocket.sendTXT(message);
+      enviarIdentificacaoESP32();
       break;
       
     case WStype_TEXT:
-      Serial.printf("WebSocket Mensagem: %s\n", payload);
-      processarComandoWebSocket((char*)payload);
+      Serial.printf("[WSc] Mensagem recebida: %s\n", payload);
+      processarMensagemWebSocket((char*)payload);
+      break;
+      
+    case WStype_BIN:
+      Serial.printf("[WSc] Dados binários recebidos: %u bytes\n", length);
+      break;
+      
+    case WStype_PING:
+      Serial.println("[WSc] Ping recebido");
+      break;
+      
+    case WStype_PONG:
+      Serial.println("[WSc] Pong recebido");
       break;
       
     case WStype_ERROR:
-      Serial.printf("WebSocket Erro: %s\n", payload);
+      Serial.printf("[WSc] Erro WebSocket: %s\n", payload);
       break;
       
     default:
+      Serial.printf("[WSc] Evento desconhecido: %d\n", type);
       break;
   }
 }
 
-void processarComandoWebSocket(String message) {
-  DynamicJsonDocument doc(1024);
-  deserializeJson(doc, message);
+void enviarIdentificacaoESP32() {
+  if (!websocketConnected) return;
   
-  String command = doc["command"];
+  DynamicJsonDocument doc(512);
+  doc[0] = "esp32_connected";
+  
+  JsonObject data = doc.createNestedObject(1);
+  data["esp32Id"] = ESP32_ID;
+  data["type"] = "esp32_connected";
+  data["timestamp"] = millis();
+  data["version"] = "2.1";
+  data["features"] = "admin_mode,rfid_reading";
+  
+  String message;
+  serializeJson(doc, message);
+  
+  webSocket.sendTXT(message);
+  Serial.println("[WSc] Identificação enviada");
+}
+
+void processarMensagemWebSocket(String message) {
+  // Verificar se é uma mensagem Socket.IO
+  if (message.startsWith("42")) {
+    // Remover prefixo Socket.IO
+    String jsonMessage = message.substring(2);
+    
+    DynamicJsonDocument doc(1024);
+    DeserializationError error = deserializeJson(doc, jsonMessage);
+    
+    if (error) {
+      Serial.print("[WSc] Erro ao parsear JSON: ");
+      Serial.println(error.c_str());
+      return;
+    }
+    
+    // Verificar se é um array Socket.IO
+    if (doc.is<JsonArray>() && doc.size() >= 2) {
+      String eventName = doc[0];
+      JsonObject eventData = doc[1];
+      
+      Serial.printf("[WSc] Evento: %s\n", eventName.c_str());
+      
+      if (eventName == "esp32Command") {
+        processarComandoESP32(eventData);
+      }
+    }
+  } else {
+    // Tentar processar como JSON direto
+    DynamicJsonDocument doc(1024);
+    DeserializationError error = deserializeJson(doc, message);
+    
+    if (!error) {
+      String command = doc["command"];
+      if (command.length() > 0) {
+        processarComandoESP32(doc);
+      }
+    }
+  }
+}
+
+void processarComandoESP32(JsonObject data) {
+  String command = data["command"];
+  
+  Serial.printf("[WSc] Comando recebido: %s\n", command.c_str());
   
   if (command == "startRFIDReading") {
-    Serial.println("Comando recebido: Iniciar modo administrativo");
+    Serial.println("[WSc] Iniciando modo administrativo");
     entrarModoAdministrativo();
   } else if (command == "stopRFIDReading") {
-    Serial.println("Comando recebido: Parar modo administrativo");
+    Serial.println("[WSc] Parando modo administrativo");
     sairModoAdministrativo();
+  } else if (command == "ping") {
+    enviarPong();
+  } else if (command == "getStatus") {
+    enviarStatusESP32();
   }
 }
 
@@ -227,18 +303,7 @@ void entrarModoAdministrativo() {
   tocarBuzzer(3, 100);
   
   // Enviar confirmação via WebSocket
-  if (websocketConnected) {
-    DynamicJsonDocument doc(512);
-    doc["type"] = "esp32Status";
-    doc["esp32Id"] = ESP32_ID;
-    doc["status"] = "admin_mode_active";
-    doc["message"] = "Modo administrativo ativado";
-    doc["timestamp"] = millis();
-    
-    String message;
-    serializeJson(doc, message);
-    webSocket.sendTXT(message);
-  }
+  enviarStatusModoAdmin("admin_mode_active", "Modo administrativo ativado");
 }
 
 void sairModoAdministrativo() {
@@ -252,48 +317,101 @@ void sairModoAdministrativo() {
   tocarBuzzer(1, 200);
   
   // Enviar confirmação via WebSocket
-  if (websocketConnected) {
-    DynamicJsonDocument doc(512);
-    doc["type"] = "esp32Status";
-    doc["esp32Id"] = ESP32_ID;
-    doc["status"] = "admin_mode_inactive";
-    doc["message"] = "Modo administrativo desativado";
-    doc["timestamp"] = millis();
-    
-    String message;
-    serializeJson(doc, message);
-    webSocket.sendTXT(message);
-  }
+  enviarStatusModoAdmin("admin_mode_inactive", "Modo administrativo desativado");
+}
+
+void enviarStatusModoAdmin(String status, String message) {
+  if (!websocketConnected) return;
+  
+  DynamicJsonDocument doc(512);
+  doc[0] = "esp32Status";
+  
+  JsonObject data = doc.createNestedObject(1);
+  data["esp32Id"] = ESP32_ID;
+  data["status"] = status;
+  data["message"] = message;
+  data["timestamp"] = millis();
+  data["adminMode"] = adminReadingMode;
+  
+  String jsonMessage;
+  serializeJson(doc, jsonMessage);
+  
+  webSocket.sendTXT("42" + jsonMessage);
+  Serial.printf("[WSc] Status enviado: %s\n", status.c_str());
 }
 
 void enviarRFIDViaWebSocket(String rfidTag) {
   if (!websocketConnected) {
-    Serial.println("WebSocket não conectado, não é possível enviar RFID");
+    Serial.println("[WSc] WebSocket não conectado, não é possível enviar RFID");
     tocarBuzzer(3, 100); // Erro
     return;
   }
   
-  Serial.println("Enviando RFID via WebSocket para admin...");
+  Serial.println("[WSc] Enviando RFID via WebSocket para admin...");
   
   DynamicJsonDocument doc(512);
-  doc["type"] = "rfidRead";
-  doc["rfidTag"] = rfidTag;
-  doc["esp32Id"] = ESP32_ID;
-  doc["source"] = "admin_reading";
-  doc["timestamp"] = millis();
+  doc[0] = "rfidRead";
   
-  String message;
-  serializeJson(doc, message);
+  JsonObject data = doc.createNestedObject(1);
+  data["rfidTag"] = rfidTag;
+  data["esp32Id"] = ESP32_ID;
+  data["source"] = "admin_reading";
+  data["timestamp"] = millis();
+  data["mode"] = "administrative";
   
-  webSocket.sendTXT(message);
+  String jsonMessage;
+  serializeJson(doc, jsonMessage);
   
-  Serial.println("RFID enviado para admin com sucesso!");
+  webSocket.sendTXT("42" + jsonMessage);
+  
+  Serial.println("[WSc] RFID enviado para admin com sucesso!");
   
   // Feedback de sucesso
   digitalWrite(LED_VERDE, HIGH);
   digitalWrite(LED_VERMELHO, LOW);
   tocarBuzzer(2, 150);
   delay(2000);
+}
+
+void enviarPong() {
+  if (!websocketConnected) return;
+  
+  DynamicJsonDocument doc(256);
+  doc[0] = "pong";
+  
+  JsonObject data = doc.createNestedObject(1);
+  data["esp32Id"] = ESP32_ID;
+  data["timestamp"] = millis();
+  
+  String message;
+  serializeJson(doc, message);
+  
+  webSocket.sendTXT("42" + message);
+  Serial.println("[WSc] Pong enviado");
+}
+
+void enviarStatusESP32() {
+  if (!websocketConnected) return;
+  
+  DynamicJsonDocument doc(512);
+  doc[0] = "esp32Status";
+  
+  JsonObject data = doc.createNestedObject(1);
+  data["esp32Id"] = ESP32_ID;
+  data["status"] = "online";
+  data["wifiConnected"] = wifiConnected;
+  data["websocketConnected"] = websocketConnected;
+  data["adminMode"] = adminReadingMode;
+  data["uptime"] = millis();
+  data["freeHeap"] = ESP.getFreeHeap();
+  data["rssi"] = WiFi.RSSI();
+  data["ip"] = WiFi.localIP().toString();
+  
+  String message;
+  serializeJson(doc, message);
+  
+  webSocket.sendTXT("42" + message);
+  Serial.println("[WSc] Status completo enviado");
 }
 
 void conectarWiFi() {
@@ -312,6 +430,8 @@ void conectarWiFi() {
     Serial.println("WiFi conectado!");
     Serial.print("IP: ");
     Serial.println(WiFi.localIP());
+    Serial.print("RSSI: ");
+    Serial.println(WiFi.RSSI());
     
     // Indicar sucesso na conexão
     piscarLed(LED_VERDE, 3, 200);
@@ -389,6 +509,11 @@ void processarRFID(String rfidTag) {
     
     // Processar resposta
     processarRespostaServidor(response);
+    
+    // Enviar via WebSocket também (para tempo real)
+    if (websocketConnected) {
+      enviarRFIDNormalViaWebSocket(rfidTag, response);
+    }
   } else {
     Serial.print("Erro na requisição: ");
     Serial.println(httpCode);
@@ -399,6 +524,27 @@ void processarRFID(String rfidTag) {
   }
   
   http.end();
+}
+
+void enviarRFIDNormalViaWebSocket(String rfidTag, String serverResponse) {
+  if (!websocketConnected) return;
+  
+  DynamicJsonDocument doc(512);
+  doc[0] = "rfidRead";
+  
+  JsonObject data = doc.createNestedObject(1);
+  data["rfidTag"] = rfidTag;
+  data["esp32Id"] = ESP32_ID;
+  data["source"] = "access_control";
+  data["timestamp"] = millis();
+  data["mode"] = "normal";
+  data["serverResponse"] = serverResponse;
+  
+  String jsonMessage;
+  serializeJson(doc, jsonMessage);
+  
+  webSocket.sendTXT("42" + jsonMessage);
+  Serial.println("[WSc] RFID normal enviado via WebSocket");
 }
 
 void processarRespostaServidor(String response) {
@@ -476,6 +622,7 @@ void printSystemInfo() {
   Serial.println("=== Informações do Sistema ===");
   Serial.print("ESP32 ID: ");
   Serial.println(ESP32_ID);
+  Serial.print("Versão: 2.1 (WebSocketsClient_Generic)");
   Serial.print("WiFi Status: ");
   Serial.println(WiFi.status() == WL_CONNECTED ? "Conectado" : "Desconectado");
   Serial.print("WebSocket Status: ");
