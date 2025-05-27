@@ -88,6 +88,104 @@ io.on('connection', (socket) => {
     console.log(`Socket ${socket.id} saiu da sala van_${vanId}`);
   });
 
+  // === FUNCIONALIDADES RFID ADMIN ===
+  
+  // Admin solicita início de leitura RFID
+  socket.on('startRFIDReading', (data) => {
+    console.log('Admin solicitou início de leitura RFID:', data);
+    
+    // Marcar este socket como admin em modo de leitura
+    socket.isAdminReading = true;
+    socket.join('admin_rfid_reading');
+    
+    // Notificar todos os ESP32s para entrar em modo de leitura
+    io.emit('esp32Command', {
+      command: 'startRFIDReading',
+      timestamp: new Date(),
+      adminSocketId: socket.id
+    });
+    
+    console.log('Comando enviado para ESP32s: iniciar leitura RFID');
+  });
+
+  // Admin cancela leitura RFID
+  socket.on('stopRFIDReading', (data) => {
+    console.log('Admin cancelou leitura RFID:', data);
+    
+    // Remover marcação de admin em leitura
+    socket.isAdminReading = false;
+    socket.leave('admin_rfid_reading');
+    
+    // Notificar todos os ESP32s para sair do modo de leitura
+    io.emit('esp32Command', {
+      command: 'stopRFIDReading',
+      timestamp: new Date(),
+      adminSocketId: socket.id
+    });
+    
+    console.log('Comando enviado para ESP32s: parar leitura RFID');
+  });
+
+  // ESP32 envia leitura RFID (tanto para admin quanto para uso normal)
+  socket.on('rfidRead', (data) => {
+    console.log('RFID lido pelo ESP32:', data);
+    
+    // Validar dados recebidos
+    if (!data.rfidTag || !data.esp32Id) {
+      console.error('Dados RFID inválidos:', data);
+      return;
+    }
+    
+    // Se há admin aguardando leitura, enviar para ele
+    const adminSockets = Array.from(io.sockets.sockets.values())
+      .filter(s => s.isAdminReading);
+    
+    if (adminSockets.length > 0) {
+      console.log('Enviando RFID para admin em modo de leitura');
+      adminSockets.forEach(adminSocket => {
+        adminSocket.emit('rfidRead', {
+          rfidTag: data.rfidTag,
+          esp32Id: data.esp32Id,
+          timestamp: new Date(),
+          source: 'admin_reading'
+        });
+      });
+    } else {
+      // Processamento normal do RFID (entrada/saída de alunos)
+      console.log('Processando RFID para controle de acesso normal');
+      
+      // Emitir para todos os clientes conectados (painel do motorista, etc.)
+      io.emit('rfidRead', {
+        rfidTag: data.rfidTag,
+        esp32Id: data.esp32Id,
+        timestamp: new Date(),
+        source: 'access_control'
+      });
+    }
+  });
+
+  // ESP32 reporta status
+  socket.on('esp32Status', (data) => {
+    console.log('Status ESP32:', data);
+    
+    // Emitir status para admins
+    socket.broadcast.emit('esp32Status', {
+      ...data,
+      timestamp: new Date()
+    });
+  });
+
+  // ESP32 reporta erro
+  socket.on('esp32Error', (data) => {
+    console.error('Erro ESP32:', data);
+    
+    // Emitir erro para admins
+    socket.broadcast.emit('esp32Error', {
+      ...data,
+      timestamp: new Date()
+    });
+  });
+
   // Ping/Pong para manter conexão viva
   socket.on('ping', () => {
     socket.emit('pong');
@@ -96,6 +194,16 @@ io.on('connection', (socket) => {
   // Desconexão
   socket.on('disconnect', () => {
     console.log(`Cliente desconectado: ${socket.id}`);
+    
+    // Se era um admin em modo de leitura, cancelar
+    if (socket.isAdminReading) {
+      console.log('Admin em modo de leitura desconectou, cancelando leitura RFID');
+      io.emit('esp32Command', {
+        command: 'stopRFIDReading',
+        timestamp: new Date(),
+        reason: 'admin_disconnected'
+      });
+    }
   });
 });
 

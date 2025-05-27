@@ -8,6 +8,8 @@ Sistema completo de controle de passageiros de van escolar com ESP32, RFID, Node
 - **🚦 Indicadores visuais**: LEDs verde e vermelho para entrada/saída autorizada/negada
 - **🔊 Feedback sonoro**: Buzzer para confirmação de ações
 - **📱 Painel do motorista**: Interface web em tempo real
+- **⚙️ Painel administrativo**: Gestão completa do sistema
+- **🎯 Leitura RFID remota**: Cadastro de cartões via interface web
 - **🌐 WebSocket**: Comunicação em tempo real entre ESP32 e painel
 - **📊 Estatísticas**: Relatórios de entrada/saída por van
 - **👥 Gestão completa**: Cadastro de motoristas, vans e alunos
@@ -26,6 +28,7 @@ Sistema completo de controle de passageiros de van escolar com ESP32, RFID, Node
 - **MFRC522** sensor RFID
 - **LEDs** verde e vermelho para indicação
 - **Buzzer** para feedback sonoro
+- **WebSocket Client** para modo administrativo
 
 ### Frontend
 - **HTML5/CSS3** interface responsiva
@@ -87,12 +90,16 @@ npm run dev
 npm start
 ```
 
-## 🔐 Login Padrão
+## 🔐 Acesso ao Sistema
 
-Após executar o script `setup.js`, você terá acesso com:
-
+### 📱 Painel do Motorista
+**URL:** `http://localhost:3000`  
 **📧 Email:** `motorista@teste.com`  
 **🔐 Senha:** `123456`
+
+### ⚙️ Painel Administrativo
+**URL:** `http://localhost:3000/admin.html`  
+Acesso direto sem login (para administradores)
 
 ### 📊 Dados de exemplo criados:
 - **Van:** VAN-0001 (ESP32_VAN_001)
@@ -106,6 +113,7 @@ Após executar o script `setup.js`, você terá acesso com:
 Instale as seguintes bibliotecas no Arduino IDE:
 - **MFRC522** by GithubCommunity
 - **ArduinoJson** by Benoit Blanchon
+- **WebSockets** by Markus Sattler
 - **WiFi** (já inclusa no ESP32)
 
 ### 2. Conexões de hardware
@@ -133,6 +141,8 @@ No arquivo `esp32/vansControl.ino`, edite:
 const char* ssid = "SUA_REDE_WIFI";
 const char* password = "SUA_SENHA_WIFI";
 const char* serverURL = "http://IP_DO_SERVIDOR:3000";
+const char* websocketHost = "IP_DO_SERVIDOR";
+const int websocketPort = 3000;
 
 // ID único do ESP32 (único para cada van)
 const String ESP32_ID = "ESP32_VAN_001";
@@ -143,13 +153,29 @@ Faça o upload do código para o ESP32 através do Arduino IDE.
 
 ## 📝 Uso do Sistema
 
-### 1. Acesse o sistema
-Abra o navegador e vá para `http://localhost:3000`
+### 1. Painel do Motorista
+- Acesse `http://localhost:3000`
+- Faça login com as credenciais
+- Monitore entradas/saídas em tempo real
+- Visualize estatísticas da van
 
-### 2. Faça login
-Use as credenciais padrão ou crie um novo motorista via API
+### 2. Painel Administrativo
+- Acesse `http://localhost:3000/admin.html`
+- **Aba Motoristas**: Cadastre e gerencie motoristas
+- **Aba Vans**: Cadastre vans e associe ESP32s
+- **Aba Alunos**: Cadastre alunos com leitura RFID remota
+- **Aba Registros**: Visualize histórico completo
 
-### 3. Teste com RFID
+### 3. Cadastro de Aluno com RFID
+1. No painel admin, vá para aba "Alunos"
+2. Preencha os dados do aluno
+3. Clique em "Ler Cartão" no campo RFID
+4. O ESP32 entrará em modo administrativo (LED verde piscando)
+5. Aproxime o cartão RFID do sensor
+6. O ID será automaticamente preenchido
+7. Complete o cadastro e salve
+
+### 4. Teste com RFID
 Use os cartões RFID de exemplo:
 - **A1B2C3D4** (João Silva)
 - **E5F6G7H8** (Ana Santos)
@@ -161,12 +187,14 @@ Use os cartões RFID de exemplo:
 - `POST /api/motoristas` - Criar motorista
 - `POST /api/motoristas/login` - Login
 - `PUT /api/motoristas/:id/van` - Associar van
+- `DELETE /api/motoristas/:id` - Excluir motorista
 
 ### Vans
 - `GET /api/vans` - Listar vans
 - `POST /api/vans` - Criar van
 - `GET /api/vans/:id` - Detalhes da van
 - `PUT /api/vans/:id` - Atualizar van
+- `DELETE /api/vans/:id` - Excluir van
 - `PUT /api/vans/:id/esp32` - Associar ESP32
 
 ### Alunos
@@ -175,6 +203,7 @@ Use os cartões RFID de exemplo:
 - `GET /api/alunos/:id` - Detalhes do aluno
 - `GET /api/alunos/rfid/:rfidTag` - Buscar por RFID
 - `PUT /api/alunos/:id` - Atualizar aluno
+- `DELETE /api/alunos/:id` - Excluir aluno
 
 ### Registros
 - `GET /api/registros` - Listar registros
@@ -187,12 +216,37 @@ Use os cartões RFID de exemplo:
 ### Cliente → Servidor
 - `joinVan(vanId)` - Entrar na sala da van
 - `leaveVan(vanId)` - Sair da sala da van
+- `startRFIDReading()` - Iniciar modo administrativo RFID
+- `stopRFIDReading()` - Parar modo administrativo RFID
 - `ping` - Verificar conexão
 
 ### Servidor → Cliente
 - `joinedVan(data)` - Confirmação de entrada na van
 - `novoRegistro(data)` - Novo registro de entrada/saída
+- `rfidRead(data)` - RFID lido (modo admin ou normal)
+- `esp32Command(data)` - Comando para ESP32
+- `esp32Status(data)` - Status do ESP32
 - `pong` - Resposta ao ping
+
+### ESP32 → Servidor
+- `rfidRead(data)` - Envio de RFID lido
+- `esp32Status(data)` - Status do dispositivo
+- `esp32Error(data)` - Erro reportado
+
+## 🎯 Modos de Operação do ESP32
+
+### Modo Normal
+- **LED vermelho fixo**: Aguardando cartão
+- **Leitura RFID**: Envia via HTTP para controle de acesso
+- **LED verde**: Acesso autorizado
+- **LED vermelho piscando**: Acesso negado
+
+### Modo Administrativo
+- **Ativação**: Via painel admin (botão "Ler Cartão")
+- **LED verde piscando**: Aguardando cartão para cadastro
+- **Comunicação**: Via WebSocket em tempo real
+- **Timeout**: 60 segundos automático
+- **Feedback**: Buzzer e LEDs para confirmação
 
 ## 🚨 Segurança
 
@@ -200,31 +254,12 @@ Use os cartões RFID de exemplo:
 - Autenticação JWT
 - Rate limiting nas APIs
 - Validação de dados de entrada
-- Helmet.js para headers de segurança
+- CORS configurado
+- Helmet para headers de segurança
 
-## 🐛 Troubleshooting
+## 🔧 Troubleshooting
 
-### ESP32 não conecta ao WiFi
-1. Verifique as credenciais de rede
-2. Certifique-se de que a rede é 2.4GHz
-3. Verifique se o ESP32 está no alcance do WiFi
-
-### MongoDB não conecta
-1. Verifique se o MongoDB está rodando
-2. Confirme a string de conexão no `.env`
-3. Verifique as permissões de rede
-
-### RFID não detecta cartões
-1. Verifique as conexões SPI
-2. Teste com cartões diferentes
-3. Verifique a alimentação do sensor
-
-### WebSocket não conecta
-1. Verifique se o servidor está rodando
-2. Confirme as configurações de CORS
-3. Teste em navegadores diferentes
-
-### Porta 3000 já está em uso
+### Servidor não inicia (porta 3000 em uso)
 ```bash
 # Windows
 netstat -ano | findstr :3000
@@ -234,41 +269,25 @@ taskkill /PID <PID_NUMBER> /F
 lsof -ti:3000 | xargs kill -9
 ```
 
-## 📦 Estrutura do Projeto
+### ESP32 não conecta ao WebSocket
+- Verifique IP do servidor no código
+- Confirme que o servidor está rodando
+- Teste conectividade de rede
+- Verifique firewall/antivírus
 
-```
-vanscontrol/
-├── config/
-│   └── database.js          # Configuração MongoDB
-├── esp32/
-│   └── vansControl.ino      # Código Arduino ESP32
-├── models/
-│   ├── Aluno.js            # Modelo de dados do Aluno
-│   ├── Motorista.js        # Modelo de dados do Motorista
-│   ├── Registro.js         # Modelo de dados do Registro
-│   └── Van.js              # Modelo de dados da Van
-├── public/
-│   ├── index.html          # Interface web
-│   └── app.js              # JavaScript frontend
-├── routes/
-│   ├── alunos.js           # Rotas API dos Alunos
-│   ├── motoristas.js       # Rotas API dos Motoristas
-│   ├── registros.js        # Rotas API dos Registros
-│   └── vans.js             # Rotas API das Vans
-├── .env.example            # Exemplo de variáveis de ambiente
-├── .gitignore              # Arquivos ignorados pelo Git
-├── package.json            # Dependências do projeto
-├── README.md               # Documentação
-└── server.js               # Servidor principal
-```
+### RFID não é detectado no modo admin
+- Certifique-se que o ESP32 está conectado via WebSocket
+- Verifique se o modo administrativo foi ativado
+- Teste a leitura RFID no modo normal primeiro
+- Verifique conexões do MFRC522
 
 ## 📄 Licença
 
-MIT License - veja o arquivo LICENSE para detalhes.
+Este projeto está sob a licença MIT. Veja o arquivo [LICENSE](LICENSE) para mais detalhes.
 
-## 👥 Contribuição
+## 🤝 Contribuição
 
-1. Fork o projeto
+1. Faça um fork do projeto
 2. Crie uma branch para sua feature (`git checkout -b feature/AmazingFeature`)
 3. Commit suas mudanças (`git commit -m 'Add some AmazingFeature'`)
 4. Push para a branch (`git push origin feature/AmazingFeature`)
@@ -276,10 +295,8 @@ MIT License - veja o arquivo LICENSE para detalhes.
 
 ## 📞 Suporte
 
-Para suporte, entre em contato:
-- Email: vinicius@email.com
-- GitHub Issues: [Issues](https://github.com/seu-usuario/vanscontrol/issues)
+Para suporte, abra uma issue no GitHub ou entre em contato via email.
 
 ---
 
-**VansControl** - Sistema inteligente de controle de passageiros 🚐✨ 
+**Desenvolvido com ❤️ para facilitar o transporte escolar seguro e eficiente.** 
