@@ -4,7 +4,7 @@ const registroSchema = new mongoose.Schema({
   aluno: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Aluno',
-    required: true
+    required: false
   },
   van: {
     type: mongoose.Schema.Types.ObjectId,
@@ -14,7 +14,7 @@ const registroSchema = new mongoose.Schema({
   motorista: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Motorista',
-    required: true
+    required: false
   },
   rfidTag: {
     type: String,
@@ -46,5 +46,6 @@ const registroSchema = new mongoose.Schema({
 // Index para otimizar consultas por van e data
 registroSchema.index({ van: 1, dataHora: -1 });
 registroSchema.index({ aluno: 1, dataHora: -1 });
+registroSchema.index({ rfidTag: 1, dataHora: -1 });
 
 module.exports = mongoose.model('Registro', registroSchema); 

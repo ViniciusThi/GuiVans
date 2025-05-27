@@ -126,6 +126,31 @@ io.on('connection', (socket) => {
     console.log('Comando enviado para ESP32s: parar leitura RFID');
   });
 
+  // === EVENTOS ESP32 ===
+  
+  // ESP32 se conecta e se identifica
+  socket.on('esp32_connected', (data) => {
+    console.log('ESP32 conectado:', data);
+    
+    // Marcar socket como ESP32
+    socket.isESP32 = true;
+    socket.esp32Id = data.esp32Id;
+    socket.esp32Version = data.version || '2.0';
+    socket.esp32Features = data.features || '';
+    
+    // Entrar na sala dos ESP32s
+    socket.join('esp32_devices');
+    
+    // Confirmar conexão
+    socket.emit('esp32_connected_ack', {
+      status: 'connected',
+      serverId: socket.id,
+      timestamp: new Date()
+    });
+    
+    console.log(`ESP32 ${data.esp32Id} registrado com sucesso`);
+  });
+
   // ESP32 envia leitura RFID (tanto para admin quanto para uso normal)
   socket.on('rfidRead', (data) => {
     console.log('RFID lido pelo ESP32:', data);
@@ -136,31 +161,29 @@ io.on('connection', (socket) => {
       return;
     }
     
+    // Adicionar informações do servidor
+    const enrichedData = {
+      ...data,
+      serverId: socket.id,
+      serverTimestamp: new Date(),
+      processed: true
+    };
+    
     // Se há admin aguardando leitura, enviar para ele
     const adminSockets = Array.from(io.sockets.sockets.values())
       .filter(s => s.isAdminReading);
     
-    if (adminSockets.length > 0) {
+    if (adminSockets.length > 0 && data.source === 'admin_reading') {
       console.log('Enviando RFID para admin em modo de leitura');
       adminSockets.forEach(adminSocket => {
-        adminSocket.emit('rfidRead', {
-          rfidTag: data.rfidTag,
-          esp32Id: data.esp32Id,
-          timestamp: new Date(),
-          source: 'admin_reading'
-        });
+        adminSocket.emit('rfidRead', enrichedData);
       });
     } else {
       // Processamento normal do RFID (entrada/saída de alunos)
       console.log('Processando RFID para controle de acesso normal');
       
       // Emitir para todos os clientes conectados (painel do motorista, etc.)
-      io.emit('rfidRead', {
-        rfidTag: data.rfidTag,
-        esp32Id: data.esp32Id,
-        timestamp: new Date(),
-        source: 'access_control'
-      });
+      io.emit('rfidRead', enrichedData);
     }
   });
 
@@ -168,10 +191,17 @@ io.on('connection', (socket) => {
   socket.on('esp32Status', (data) => {
     console.log('Status ESP32:', data);
     
-    // Emitir status para admins
+    // Atualizar informações do socket
+    if (socket.isESP32) {
+      socket.esp32Status = data.status;
+      socket.esp32LastSeen = new Date();
+    }
+    
+    // Emitir status para admins e clientes interessados
     socket.broadcast.emit('esp32Status', {
       ...data,
-      timestamp: new Date()
+      serverId: socket.id,
+      serverTimestamp: new Date()
     });
   });
 
@@ -182,8 +212,65 @@ io.on('connection', (socket) => {
     // Emitir erro para admins
     socket.broadcast.emit('esp32Error', {
       ...data,
-      timestamp: new Date()
+      serverId: socket.id,
+      serverTimestamp: new Date()
     });
+  });
+
+  // ESP32 responde a ping
+  socket.on('pong', (data) => {
+    console.log('Pong recebido do ESP32:', data);
+    
+    if (socket.isESP32) {
+      socket.esp32LastPong = new Date();
+    }
+  });
+
+  // === COMANDOS PARA ESP32 ===
+  
+  // Enviar comando específico para ESP32
+  socket.on('sendESP32Command', (data) => {
+    console.log('Comando para ESP32:', data);
+    
+    if (data.esp32Id) {
+      // Enviar para ESP32 específico
+      const targetSocket = Array.from(io.sockets.sockets.values())
+        .find(s => s.isESP32 && s.esp32Id === data.esp32Id);
+      
+      if (targetSocket) {
+        targetSocket.emit('esp32Command', data);
+        console.log(`Comando enviado para ESP32 ${data.esp32Id}`);
+      } else {
+        console.log(`ESP32 ${data.esp32Id} não encontrado`);
+        socket.emit('commandError', { 
+          error: 'ESP32 não encontrado',
+          esp32Id: data.esp32Id 
+        });
+      }
+    } else {
+      // Enviar para todos os ESP32s
+      io.to('esp32_devices').emit('esp32Command', data);
+      console.log('Comando enviado para todos os ESP32s');
+    }
+  });
+
+  // Listar ESP32s conectados
+  socket.on('listESP32s', () => {
+    const esp32List = Array.from(io.sockets.sockets.values())
+      .filter(s => s.isESP32)
+      .map(s => ({
+        socketId: s.id,
+        esp32Id: s.esp32Id,
+        version: s.esp32Version,
+        features: s.esp32Features,
+        status: s.esp32Status,
+        lastSeen: s.esp32LastSeen,
+        lastPong: s.esp32LastPong,
+        connected: true
+      }));
+    
+    socket.emit('esp32List', esp32List);
+    console.log(`Lista de ESP32s enviada: ${esp32List.length} dispositivos`);
   });
 
   // Ping/Pong para manter conexão viva
@@ -194,6 +281,18 @@ io.on('connection', (socket) => {
   // Desconexão
   socket.on('disconnect', () => {
     console.log(`Cliente desconectado: ${socket.id}`);
+    
+    // Se era um ESP32, remover da lista
+    if (socket.isESP32) {
+      console.log(`ESP32 ${socket.esp32Id} desconectado`);
+      
+      // Notificar outros clientes sobre desconexão do ESP32
+      socket.broadcast.emit('esp32Disconnected', {
+        esp32Id: socket.esp32Id,
+        socketId: socket.id,
+        timestamp: new Date()
+      });
+    }
     
     // Se era um admin em modo de leitura, cancelar
     if (socket.isAdminReading) {

@@ -13,7 +13,7 @@
 #define BUZZER 5
 
 // Configurações de Rede
-const char* ssid = "dlink - 5Ghz";
+const char* ssid = "dlink";
 const char* password = "661705550232";
 const char* serverURL = "http://192.168.0.113:3000";
 const char* websocketHost = "192.168.0.113";
@@ -21,6 +21,30 @@ const int websocketPort = 3000;
 
 // ID único do ESP32 (deve ser único para cada van)
 const String ESP32_ID = "ESP32_VAN_001";
+
+// Declarações de função
+void configurarWebSocket();
+void webSocketEvent(WStype_t type, uint8_t * payload, size_t length);
+void enviarIdentificacaoESP32();
+void processarMensagemWebSocket(String message);
+void processarComandoESP32(JsonObject data);
+void processarComandoESP32(DynamicJsonDocument& doc);
+void entrarModoAdministrativo();
+void sairModoAdministrativo();
+void enviarStatusModoAdmin(String status, String message);
+void enviarRFIDViaWebSocket(String rfidTag);
+void enviarPong();
+void enviarStatusESP32();
+void conectarWiFi();
+void testarConexaoServidor();
+String lerUIDCartao();
+void processarRFID(String rfidTag);
+void enviarRFIDNormalViaWebSocket(String rfidTag, String serverResponse);
+void processarRespostaServidor(String response);
+void tocarBuzzer(int vezes, int duracao);
+void piscarLed(int led, int vezes, int duracao);
+void printSystemInfo();
+void reconectarWebSocket();
 
 // Objetos
 MFRC522 rfid(SS_PIN, RST_PIN);
@@ -32,6 +56,12 @@ unsigned long lastCardRead = 0;
 const unsigned long DEBOUNCE_TIME = 2000; // 2 segundos entre leituras
 bool wifiConnected = false;
 bool websocketConnected = false;
+
+// Controle de reconexão WebSocket
+unsigned long lastWebSocketAttempt = 0;
+const unsigned long WEBSOCKET_RETRY_INTERVAL = 10000; // 10 segundos
+int websocketReconnectAttempts = 0;
+const int MAX_WEBSOCKET_ATTEMPTS = 5;
 
 // Modo administrativo
 bool adminReadingMode = false;
@@ -92,6 +122,23 @@ void loop() {
   // Processar WebSocket
   webSocket.loop();
   
+  // Verificar e reconectar WebSocket se necessário
+  if (!websocketConnected && wifiConnected) {
+    if (millis() - lastWebSocketAttempt > WEBSOCKET_RETRY_INTERVAL) {
+      if (websocketReconnectAttempts < MAX_WEBSOCKET_ATTEMPTS) {
+        Serial.println("Tentando reconectar WebSocket...");
+        lastWebSocketAttempt = millis();
+        websocketReconnectAttempts++;
+        configurarWebSocket();
+      }
+    }
+  }
+  
+  // Reset contador de tentativas quando conectado
+  if (websocketConnected) {
+    websocketReconnectAttempts = 0;
+  }
+  
   // Verificar timeout do modo administrativo
   if (adminReadingMode && (millis() - adminModeStartTime > ADMIN_MODE_TIMEOUT)) {
     Serial.println("Timeout do modo administrativo");
@@ -111,9 +158,19 @@ void loop() {
         }
         digitalWrite(LED_VERMELHO, LOW);
       } else {
-        // Modo normal - LED vermelho fixo
-        digitalWrite(LED_VERMELHO, HIGH);
-        digitalWrite(LED_VERDE, LOW);
+        // Modo normal - LED baseado na conexão
+        if (websocketConnected) {
+          digitalWrite(LED_VERMELHO, HIGH);
+          digitalWrite(LED_VERDE, LOW);
+        } else {
+          // Piscar vermelho se WebSocket desconectado
+          static unsigned long lastBlinkRed = 0;
+          if (millis() - lastBlinkRed > 1000) {
+            digitalWrite(LED_VERMELHO, !digitalRead(LED_VERMELHO));
+            lastBlinkRed = millis();
+          }
+          digitalWrite(LED_VERDE, LOW);
+        }
       }
     }
     delay(100);
@@ -134,6 +191,8 @@ void loop() {
   Serial.println(rfidTag);
   Serial.print("Modo: ");
   Serial.println(adminReadingMode ? "Administrativo" : "Normal");
+  Serial.print("WebSocket: ");
+  Serial.println(websocketConnected ? "Conectado" : "Desconectado");
   
   // Piscar LED azul (simulado com verde rápido) para indicar leitura
   piscarLed(LED_VERDE, 3, 100);
@@ -158,17 +217,27 @@ void loop() {
 void configurarWebSocket() {
   Serial.println("Configurando WebSocket Generic...");
   
+  // Desconectar se já estiver conectado
+  if (websocketConnected) {
+    webSocket.disconnect();
+    delay(1000);
+  }
+  
   // Configurar WebSocket com Socket.IO
   webSocket.beginSocketIO(websocketHost, websocketPort, "/socket.io/?EIO=4&transport=websocket");
   
   // Configurar eventos
   webSocket.onEvent(webSocketEvent);
   
-  // Configurar reconexão automática
-  webSocket.setReconnectInterval(5000);
-  webSocket.enableHeartbeat(15000, 3000, 2);
+  // Configurar reconexão automática mais agressiva
+  webSocket.setReconnectInterval(3000);  // Tentar reconectar a cada 3 segundos
+  webSocket.enableHeartbeat(10000, 3000, 3);  // Heartbeat mais frequente
   
   Serial.println("WebSocket Generic configurado");
+  Serial.print("Tentando conectar em: ");
+  Serial.print(websocketHost);
+  Serial.print(":");
+  Serial.println(websocketPort);
 }
 
 void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
@@ -267,6 +336,7 @@ void processarMensagemWebSocket(String message) {
     if (!error) {
       String command = doc["command"];
       if (command.length() > 0) {
+        // Usar sobrecarga para DynamicJsonDocument
         processarComandoESP32(doc);
       }
     }
@@ -288,7 +358,15 @@ void processarComandoESP32(JsonObject data) {
     enviarPong();
   } else if (command == "getStatus") {
     enviarStatusESP32();
+  } else {
+    Serial.printf("[WSc] Comando desconhecido: %s\n", command.c_str());
   }
+}
+
+// Sobrecarga para aceitar DynamicJsonDocument diretamente
+void processarComandoESP32(DynamicJsonDocument& doc) {
+  JsonObject data = doc.as<JsonObject>();
+  processarComandoESP32(data);
 }
 
 void entrarModoAdministrativo() {
@@ -638,5 +716,22 @@ void printSystemInfo() {
   Serial.print("Uptime: ");
   Serial.println(millis() / 1000);
   Serial.println("============================");
+}
+
+void reconectarWebSocket() {
+  // Implemente a lógica para reconectar o WebSocket
+  // Isso pode incluir verificar o tempo desde a última tentativa,
+  // verificar o número de tentativas e decidir se deve reconectar ou não
+  // Este é um exemplo básico e pode ser melhorado conforme necessário
+  if (millis() - lastWebSocketAttempt > WEBSOCKET_RETRY_INTERVAL) {
+    lastWebSocketAttempt = millis();
+    websocketReconnectAttempts++;
+    if (websocketReconnectAttempts <= MAX_WEBSOCKET_ATTEMPTS) {
+      Serial.println("Reconectando WebSocket...");
+      configurarWebSocket();
+    } else {
+      Serial.println("Número máximo de tentativas atingido. WebSocket não reconectado.");
+    }
+  }
 } 
  
