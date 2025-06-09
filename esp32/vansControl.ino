@@ -15,6 +15,7 @@
 // Memória RTC para sobreviver a resets
 RTC_DATA_ATTR int rtcResetCount = 0;
 RTC_DATA_ATTR int rtcWiFiFailCount = 0;
+RTC_DATA_ATTR char rtcLastAdminCommand[50] = ""; // Armazenar último comando administrativo
 
 // Configurações de Rede
 const char* ssid = "Gui";
@@ -27,16 +28,16 @@ const char* websocketPath = "/socket.io/?EIO=4&transport=websocket&device=esp32&
 // Timeouts e constantes
 #define WIFI_CONNECT_TIMEOUT 20000    // 20 segundos para timeout de conexão WiFi
 #define WIFI_RETRY_DELAY 5000         // 5 segundos entre tentativas de conexão WiFi
-#define MAX_WIFI_ATTEMPTS 5           // Número máximo de tentativas antes de reiniciar (aumentado de 3 para 5)
+#define MAX_WIFI_ATTEMPTS 7           // Número máximo de tentativas antes de reiniciar (aumentado para 7)
 #define MAX_RESET_COUNT 5             // Número máximo de resets consecutivos
 #define SAFE_MODE_DURATION 300000     // 5 minutos em modo seguro
 
 // Parâmetros de conexão - variáveis para ajuste dinâmico
-unsigned long PING_INTERVAL = 3000;   // 3 segundos entre pings (reduzido de 5s para 3s)
-const unsigned long RECONNECT_DELAY = 2000;    // 2 segundos entre tentativas de reconexão (reduzido de 3s para 2s)
-const int MAX_RECONNECT_ATTEMPTS = 20;         // Máximo de tentativas antes de reiniciar WiFi (aumentado de 15 para 20)
-const unsigned long WIFI_RECONNECT_TIMEOUT = 15000; // 15 segundos entre tentativas de reconexão WiFi (reduzido de 30s para 15s)
-const unsigned long IDENTIFICACAO_INTERVAL = 20000; // 20 segundos entre envios de identificação (reduzido de 30s para 20s)
+unsigned long PING_INTERVAL = 2000;   // 2 segundos entre pings (reduzido de 3s para 2s)
+const unsigned long RECONNECT_DELAY = 1000;    // 1 segundo entre tentativas de reconexão (reduzido para 1s)
+const int MAX_RECONNECT_ATTEMPTS = 30;         // Máximo de tentativas antes de reiniciar WiFi (aumentado para 30)
+const unsigned long WIFI_RECONNECT_TIMEOUT = 10000; // 10 segundos entre tentativas de reconexão WiFi (reduzido para 10s)
+const unsigned long IDENTIFICACAO_INTERVAL = 15000; // 15 segundos entre envios de identificação (reduzido para 15s)
 
 // ID único do ESP32
 const String ESP32_ID = "ESP32";
@@ -53,9 +54,10 @@ bool wifiConnected = false;
 bool websocketConnected = false;
 bool adminReadingMode = false;
 unsigned long adminModeStartTime = 0;
-const unsigned long ADMIN_MODE_TIMEOUT = 60000;
+const unsigned long ADMIN_MODE_TIMEOUT = 120000; // Aumentado para 2 minutos
 bool safeMode = false;
 unsigned long safeModeStartTime = 0;
+String adminModeType = ""; // Tipo de modo administrativo (generic, cadastroAluno, etc)
 
 // Variáveis para monitoramento de conexão
 unsigned long lastPingTime = 0;
@@ -64,7 +66,7 @@ int reconnectAttempts = 0;  // Contador de tentativas de reconexão
 unsigned long lastWifiReconnect = 0;
 unsigned long lastIdentificacao = 0;
 unsigned long lastWifiCheck = 0;               // Última verificação do WiFi
-const unsigned long WIFI_CHECK_INTERVAL = 5000; // Verificar WiFi a cada 5 segundos
+const unsigned long WIFI_CHECK_INTERVAL = 3000; // Verificar WiFi a cada 3 segundos (reduzido de 5s)
 
 // Adicionar contador de resets para evitar loop infinito
 int totalResets = 0;
@@ -76,7 +78,7 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length);
 void enviarIdentificacaoESP32();
 void processarMensagemWebSocket(String message);
 void processarComandoESP32(JsonObject data);
-void entrarModoAdministrativo();
+void entrarModoAdministrativo(String tipo = "generic");
 void sairModoAdministrativo();
 void enviarRFIDViaWebSocket(String rfidTag);
 void conectarWiFi();
@@ -92,12 +94,14 @@ void reiniciarWiFi();
 bool tentarConectarWiFi();
 void diagnosticarProblemaWiFi();
 void enterSafeMode();
+void salvarUltimoComandoAdmin(const char* comando);
+bool verificarComandoAdminPersistente();
 
 void setup() {
   Serial.begin(115200);
   delay(1000);
   
-  Serial.println("=== VansControl ESP32 Simples ===");
+  Serial.println("=== VansControl ESP32 Versão 2.3 ===");
   Serial.printf("Reset count: %d, WiFi fail count: %d\n", rtcResetCount, rtcWiFiFailCount);
   
   // Incrementar contador de resets
@@ -123,6 +127,11 @@ void setup() {
     return;
   }
   
+  // Verificar se temos um comando administrativo pendente
+  if (verificarComandoAdminPersistente()) {
+    Serial.println("Comando administrativo persistente detectado. Priorizando conexão...");
+  }
+  
   // Inicialização normal do WiFi
   Serial.println("Iniciando WiFi normalmente...");
   // Evitar chamadas que podem causar o erro netstack
@@ -142,7 +151,7 @@ void setup() {
   // Esperar conexão com timeout
   int timeout = 0;
   while (WiFi.status() != WL_CONNECTED && timeout < 30) {
-    delay(1000);
+    delay(500);
     Serial.print(".");
     timeout++;
   }
@@ -491,7 +500,7 @@ void configurarWebSocket() {
   
   // Limpar estado anterior do WebSocket
   webSocket.disconnect();
-  delay(500);
+  delay(300);
   
   // Verificar se WiFi está conectado
   if (WiFi.status() != WL_CONNECTED) {
@@ -510,11 +519,13 @@ void configurarWebSocket() {
   path += rtcResetCount;
   path += "&uptime=";
   path += millis() / 1000;
+  path += "&random=";
+  path += random(1000, 9999); // Adicionar número aleatório para evitar cache
   
   // Configurações mais robustas para o WebSocket
-  webSocket.setExtraHeaders("User-Agent: TransControl ESP32/2.2\r\nOrigin: http://esp32.local");
-  webSocket.setReconnectInterval(500);  // 500ms (era 1s) - Reconectar mais rápido
-  webSocket.enableHeartbeat(15000, 2000, 3); // 15 segundos entre heartbeats (2s timeout, 3 tentativas) - Mais agressivo
+  webSocket.setExtraHeaders("User-Agent: TransControl ESP32/2.3\r\nOrigin: http://esp32.local\r\nConnection: keep-alive");
+  webSocket.setReconnectInterval(200);  // 200ms (reduzido de 500ms) - Reconectar muito mais rápido
+  webSocket.enableHeartbeat(10000, 1000, 5); // 10 segundos entre heartbeats (1s timeout, 5 tentativas) - Ainda mais agressivo
   
   // Usar Socket.IO v4 com configurações para garantir estabilidade
   Serial.printf("Conectando ao servidor WebSocket: %s:%d%s\n", websocketHost, websocketPort, path.c_str());
@@ -619,6 +630,45 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
 void verificarConexaoWebSocket() {
   unsigned long currentMillis = millis();
   
+  // Verificar WiFi mais frequentemente
+  if (currentMillis - lastWifiCheck >= WIFI_CHECK_INTERVAL) {
+    lastWifiCheck = currentMillis;
+    
+    // Verificar estado atual do WiFi
+    int wifiStatus = WiFi.status();
+    
+    // Se não estiver conectado, atualizar status e tentar reconectar se necessário
+    if (wifiStatus != WL_CONNECTED && wifiConnected) {
+      Serial.println("WiFi desconectado! Status: " + String(wifiStatus));
+      wifiConnected = false;
+      websocketConnected = false;
+      
+      // Mostrar status de erro no LED
+      digitalWrite(LED_VERDE, LOW);
+      digitalWrite(LED_VERMELHO, HIGH);
+      
+      // Tentar reconectar imediatamente no modo admin
+      if (adminReadingMode) {
+        Serial.println("Reconexão imediata devido ao modo administrativo ativo");
+        tentarConectarWiFi();
+      }
+    }
+    
+    // Se estava desconectado e agora está conectado, atualizar status
+    if (wifiStatus == WL_CONNECTED && !wifiConnected) {
+      Serial.println("WiFi reconectado automaticamente!");
+      wifiConnected = true;
+      
+      // Piscar LED para indicar reconexão
+      piscarLed(LED_VERDE, 2, 200);
+      
+      // Tentar reconectar WebSocket imediatamente
+      if (!websocketConnected) {
+        configurarWebSocket();
+      }
+    }
+  }
+  
   // Verificar WiFi
   if (WiFi.status() != WL_CONNECTED) {
     // WiFi desconectado
@@ -633,8 +683,11 @@ void verificarConexaoWebSocket() {
       digitalWrite(LED_VERDE, LOW);
     }
     
+    // Tentar reconectar mais frequentemente se estiver em modo administrativo
+    unsigned long reconnectTimeout = adminReadingMode ? 5000 : WIFI_RECONNECT_TIMEOUT;
+    
     // Tentar reconectar a cada WIFI_RECONNECT_TIMEOUT
-    if (currentMillis - lastWifiReconnect > WIFI_RECONNECT_TIMEOUT) {
+    if (currentMillis - lastWifiReconnect > reconnectTimeout) {
       lastWifiReconnect = currentMillis;
       
       // Abordagem robusta de reconexão
@@ -675,7 +728,7 @@ void verificarConexaoWebSocket() {
       
       // Fechar qualquer conexão pendente
       webSocket.disconnect();
-      delay(300); // Reduzido de 500ms para 300ms
+      delay(200); // Reduzido para 200ms
       
       // Construir caminho com o ID único e parâmetros adicionais
       String path = String(websocketPath);
@@ -686,6 +739,8 @@ void verificarConexaoWebSocket() {
       path += reconnectAttempts;
       path += "&random=";
       path += millis(); // Adicionar timestamp para evitar cache
+      path += "&adminMode=";
+      path += adminReadingMode ? "1" : "0"; // Indicar se está em modo admin
       
       // Iniciar nova conexão
       webSocket.beginSocketIO(websocketHost, websocketPort, path.c_str());
@@ -728,7 +783,7 @@ void enviarIdentificacaoESP32() {
   message += ESP32_ID;
   message += "\",\"type\":\"esp32_connected\",\"timestamp\":";
   message += millis();
-  message += ",\"version\":\"2.2\",\"ip\":\"";
+  message += ",\"version\":\"2.3\",\"ip\":\"";
   message += WiFi.localIP().toString();
   message += "\",\"rssi\":";
   message += WiFi.RSSI();
@@ -867,9 +922,23 @@ void processarComandoESP32(JsonObject data) {
   Serial.printf("Comando: %s\n", command.c_str());
   
   if (command == "startRFIDReading") {
-    Serial.println("Iniciando modo administrativo");
-    entrarModoAdministrativo();
+    // Verificar se há tipo específico de leitura
+    String tipo = "generic";
+    if (data.containsKey("adminType")) {
+      tipo = data["adminType"].as<String>();
+    }
+    
+    // Salvar comando para persistência em caso de reinício
+    if (tipo == "cadastroAluno") {
+      salvarUltimoComandoAdmin("startRFIDReading_cadastroAluno");
+    }
+    
+    Serial.printf("Iniciando modo administrativo: %s\n", tipo.c_str());
+    entrarModoAdministrativo(tipo);
   } else if (command == "stopRFIDReading") {
+    // Limpar comando persistente
+    salvarUltimoComandoAdmin("");
+    
     Serial.println("Parando modo administrativo");
     sairModoAdministrativo();
   } else if (command == "reconnect") {
@@ -883,31 +952,53 @@ void processarComandoESP32(JsonObject data) {
   }
 }
 
-void entrarModoAdministrativo() {
+void entrarModoAdministrativo(String tipo) {
   adminReadingMode = true;
   adminModeStartTime = millis();
+  adminModeType = tipo;
   
-  Serial.println("=== MODO ADMINISTRATIVO ATIVADO ===");
+  Serial.printf("=== MODO ADMINISTRATIVO ATIVADO: %s ===\n", tipo.c_str());
   
-  piscarLed(LED_VERDE, 5, 100);
-  tocarBuzzer(3, 100);
+  // Feedback visual específico para cada tipo
+  if (tipo == "cadastroAluno") {
+    // Mais feedback para cadastro de aluno
+    piscarLed(LED_VERDE, 7, 80);
+    tocarBuzzer(4, 80);
+  } else {
+    // Feedback padrão
+    piscarLed(LED_VERDE, 5, 100);
+    tocarBuzzer(3, 100);
+  }
 }
 
 void sairModoAdministrativo() {
   adminReadingMode = false;
+  adminModeType = "";
   
   Serial.println("=== MODO ADMINISTRATIVO DESATIVADO ===");
   
   digitalWrite(LED_VERDE, LOW);
-  digitalWrite(LED_VERMELHO, HIGH);
+  if (websocketConnected) {
+    digitalWrite(LED_VERDE, HIGH);
+    digitalWrite(LED_VERMELHO, LOW);
+  } else {
+    digitalWrite(LED_VERMELHO, HIGH);
+  }
   tocarBuzzer(1, 200);
 }
 
 void enviarRFIDViaWebSocket(String rfidTag) {
   if (!websocketConnected) {
-    Serial.println("WebSocket não conectado");
-    tocarBuzzer(3, 100);
-    return;
+    Serial.println("WebSocket não conectado, tentando reconectar");
+    configurarWebSocket();
+    delay(500);
+    
+    // Tentar enviar mesmo sem confirmação de conexão (se WiFi estiver conectado)
+    if (!WiFi.status() == WL_CONNECTED) {
+      Serial.println("WiFi não conectado, impossível enviar RFID");
+      tocarBuzzer(3, 100);
+      return;
+    }
   }
   
   Serial.println("Enviando RFID via WebSocket...");
@@ -920,6 +1011,7 @@ void enviarRFIDViaWebSocket(String rfidTag) {
   data["esp32Id"] = ESP32_ID;
   data["source"] = "admin_reading";
   data["timestamp"] = millis();
+  data["adminType"] = adminModeType;  // Adicionar tipo de modo administrativo
   
   String jsonMessage;
   serializeJson(doc, jsonMessage);
@@ -930,7 +1022,17 @@ void enviarRFIDViaWebSocket(String rfidTag) {
   digitalWrite(LED_VERDE, HIGH);
   digitalWrite(LED_VERMELHO, LOW);
   tocarBuzzer(2, 150);
-  delay(2000);
+  
+  // Se estiver em modo de cadastro, enviar novamente após um breve intervalo para garantir recebimento
+  if (adminModeType == "cadastroAluno") {
+    delay(500);
+    webSocket.sendTXT("42" + jsonMessage);
+    Serial.println("RFID reenviado para garantir recebimento no cadastro");
+    delay(500);
+    webSocket.sendTXT("42" + jsonMessage);  // Terceira tentativa
+  }
+  
+  delay(1000);
 }
 
 String lerUIDCartao() {
@@ -1152,4 +1254,28 @@ void enterSafeMode() {
   }
   
   Serial.printf("Modo seguro ativo por %d segundos\n", SAFE_MODE_DURATION / 1000);
+}
+
+// Novas funções para persistência de comandos administrativos
+void salvarUltimoComandoAdmin(const char* comando) {
+  strncpy(rtcLastAdminCommand, comando, sizeof(rtcLastAdminCommand) - 1);
+  rtcLastAdminCommand[sizeof(rtcLastAdminCommand) - 1] = '\0';
+  Serial.printf("Comando administrativo salvo na memória RTC: %s\n", rtcLastAdminCommand);
+}
+
+bool verificarComandoAdminPersistente() {
+  if (strlen(rtcLastAdminCommand) > 0) {
+    Serial.printf("Comando administrativo persistente encontrado: %s\n", rtcLastAdminCommand);
+    
+    // Se o comando for para iniciar leitura RFID para cadastro
+    if (strncmp(rtcLastAdminCommand, "startRFIDReading_", 17) == 0) {
+      String tipo = String(rtcLastAdminCommand).substring(17);
+      Serial.printf("Restaurando modo administrativo: %s\n", tipo.c_str());
+      entrarModoAdministrativo(tipo);
+      return true;
+    }
+    
+    return true;
+  }
+  return false;
 } 
