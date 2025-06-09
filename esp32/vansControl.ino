@@ -331,16 +331,29 @@ void loop() {
   Serial.println(rfidTag);
   Serial.print("Modo: ");
   Serial.println(adminReadingMode ? "Administrativo" : "Normal");
+  Serial.print("Tipo admin: ");
+  Serial.println(adminModeType);
   
   // Piscar LED para indicar leitura
   piscarLed(LED_VERDE, 3, 100);
   
+  // Resolver problema de modo administrativo - verificar explicitamente se estamos em modo administrativo
   if (adminReadingMode) {
     // Modo administrativo - enviar via WebSocket
+    Serial.println("Modo administrativo detectado. Enviando via WebSocket...");
     enviarRFIDViaWebSocket(rfidTag);
-    sairModoAdministrativo();
+    
+    // NÃO sair do modo administrativo automaticamente se for modo de cadastro
+    if (adminModeType != "cadastroAluno") {
+      sairModoAdministrativo();
+    } else {
+      Serial.println("Permanecendo em modo de cadastro para leituras adicionais");
+      // Reiniciar timer para evitar timeout muito rápido
+      adminModeStartTime = millis();
+    }
   } else {
     // Modo normal - processar via HTTP
+    Serial.println("Modo normal detectado. Processando via HTTP...");
     processarRFID(rfidTag);
   }
   
@@ -774,36 +787,46 @@ void reiniciarWebSocket() {
 }
 
 void enviarIdentificacaoESP32() {
-  if (!websocketConnected) return;
+  // Verificar se WebSocket está conectado
+  if (!websocketConnected) {
+    Serial.println("WebSocket não conectado, impossível enviar identificação");
+    return;
+  }
   
-  Serial.println("Enviando identificação para o servidor...");
+  Serial.println("Enviando identificação ESP32...");
   
-  // Incluir mais informações de diagnóstico
-  String message = "42[\"esp32_connected\",{\"esp32Id\":\"";
-  message += ESP32_ID;
-  message += "\",\"type\":\"esp32_connected\",\"timestamp\":";
-  message += millis();
-  message += ",\"version\":\"2.3\",\"ip\":\"";
-  message += WiFi.localIP().toString();
-  message += "\",\"rssi\":";
-  message += WiFi.RSSI();
-  message += ",\"resetCount\":";
-  message += rtcResetCount;
-  message += ",\"wifiFailCount\":";
-  message += rtcWiFiFailCount;
-  message += ",\"uptime\":";
-  message += millis() / 1000;
-  message += ",\"freeHeap\":";
-  message += ESP.getFreeHeap();
-  message += ",\"reconnects\":";
-  message += reconnectAttempts;
-  message += ",\"clientTime\":\"";
-  message += String(millis());
-  message += "\"}]";
+  // Criar objeto JSON de identificação no formato Socket.IO
+  DynamicJsonDocument doc(512);
+  doc[0] = "esp32Identification";
   
-  webSocket.sendTXT(message);
+  JsonObject data = doc.createNestedObject(1);
+  data["esp32Id"] = ESP32_ID;
+  data["version"] = "2.3"; // Versão do firmware
+  data["ip"] = WiFi.localIP().toString();
+  data["rssi"] = WiFi.RSSI();
+  data["freeHeap"] = ESP.getFreeHeap();
+  data["uptime"] = millis() / 1000;
+  data["resetCount"] = rtcResetCount;
+  data["wifiFailCount"] = rtcWiFiFailCount;
+  data["adminMode"] = adminReadingMode;
+  data["adminModeType"] = adminReadingMode ? adminModeType : "";
+  data["clientTime"] = String(millis());
   
-  Serial.println("[WSc] Identificação enviada");
+  // Serializar para envio
+  String jsonMessage;
+  serializeJson(doc, jsonMessage);
+  
+  // Prefixo 42 indica evento Socket.IO
+  webSocket.sendTXT("42" + jsonMessage);
+  
+  Serial.println("Identificação ESP32 enviada");
+  
+  // Indicação visual breve de que o ESP32 está enviando dados
+  digitalWrite(LED_VERDE, HIGH);
+  delay(50);
+  if (!websocketConnected) {
+    digitalWrite(LED_VERDE, LOW);
+  }
 }
 
 void processarMensagemWebSocket(String message) {
@@ -946,12 +969,21 @@ void processarComandoESP32(JsonObject data) {
     
     Serial.printf("Iniciando modo administrativo: %s\n", tipo.c_str());
     entrarModoAdministrativo(tipo);
+    
+    // Confirmar que o comando foi recebido
+    String jsonMessage = "[\"commandAck\", {\"command\":\"" + command + "\", \"status\":\"received\", \"type\":\"" + tipo + "\", \"timestamp\":" + String(millis()) + "}]";
+    webSocket.sendTXT("42" + jsonMessage);
+    Serial.println("Confirmação de comando enviada");
   } else if (command == "stopRFIDReading") {
     // Limpar comando persistente
     salvarUltimoComandoAdmin("");
     
     Serial.println("Parando modo administrativo");
     sairModoAdministrativo();
+    
+    // Confirmar que o comando foi recebido
+    String jsonMessage = "[\"commandAck\", {\"command\":\"" + command + "\", \"status\":\"received\", \"timestamp\":" + String(millis()) + "}]";
+    webSocket.sendTXT("42" + jsonMessage);
   } else if (command == "reconnect") {
     Serial.println("Comando de reconexão recebido do servidor");
     reiniciarWebSocket();
@@ -969,12 +1001,17 @@ void entrarModoAdministrativo(String tipo) {
   adminModeType = tipo;
   
   Serial.printf("=== MODO ADMINISTRATIVO ATIVADO: %s ===\n", tipo.c_str());
+  Serial.println("Aguardando leitura de cartão RFID...");
   
   // Feedback visual específico para cada tipo
   if (tipo == "cadastroAluno") {
     // Mais feedback para cadastro de aluno
     piscarLed(LED_VERDE, 7, 80);
     tocarBuzzer(4, 80);
+    
+    // Notificar que estamos em modo de cadastro
+    String jsonMessage = "[\"esp32Status\", {\"status\":\"ready\", \"mode\":\"cadastroAluno\", \"timestamp\":" + String(millis()) + "}]";
+    webSocket.sendTXT("42" + jsonMessage);
   } else {
     // Feedback padrão
     piscarLed(LED_VERDE, 5, 100);
