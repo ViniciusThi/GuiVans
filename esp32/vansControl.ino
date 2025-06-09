@@ -931,6 +931,17 @@ void processarComandoESP32(JsonObject data) {
     // Salvar comando para persistência em caso de reinício
     if (tipo == "cadastroAluno") {
       salvarUltimoComandoAdmin("startRFIDReading_cadastroAluno");
+      
+      // Priorizar a conexão WiFi para cadastro
+      if (!wifiConnected || !websocketConnected) {
+        Serial.println("Priorizando reconexão para cadastro de aluno");
+        if (!wifiConnected) {
+          tentarConectarWiFi();
+        }
+        if (wifiConnected && !websocketConnected) {
+          configurarWebSocket();
+        }
+      }
     }
     
     Serial.printf("Iniciando modo administrativo: %s\n", tipo.c_str());
@@ -988,13 +999,30 @@ void sairModoAdministrativo() {
 }
 
 void enviarRFIDViaWebSocket(String rfidTag) {
+  // Se estamos em modo de cadastro de aluno, tentar mais agressivamente garantir conexão
+  if (adminModeType == "cadastroAluno") {
+    // Garantir conexão WiFi
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("Reconectando WiFi para enviar RFID de cadastro");
+      tentarConectarWiFi();
+      delay(500);
+    }
+    
+    // Tentar reconectar WebSocket se necessário
+    if (!websocketConnected) {
+      Serial.println("Reconectando WebSocket para enviar RFID de cadastro");
+      configurarWebSocket();
+      delay(1000);
+    }
+  }
+  
   if (!websocketConnected) {
     Serial.println("WebSocket não conectado, tentando reconectar");
     configurarWebSocket();
     delay(500);
     
     // Tentar enviar mesmo sem confirmação de conexão (se WiFi estiver conectado)
-    if (!WiFi.status() == WL_CONNECTED) {
+    if (WiFi.status() != WL_CONNECTED) {
       Serial.println("WiFi não conectado, impossível enviar RFID");
       tocarBuzzer(3, 100);
       return;
@@ -1013,11 +1041,20 @@ void enviarRFIDViaWebSocket(String rfidTag) {
   data["timestamp"] = millis();
   data["adminType"] = adminModeType;  // Adicionar tipo de modo administrativo
   
+  // Para cadastro de aluno, não desativar o modo após leitura (permitir leituras múltiplas)
+  if (adminModeType != "cadastroAluno") {
+    data["stopAfterRead"] = true;
+  }
+  
   String jsonMessage;
   serializeJson(doc, jsonMessage);
-  webSocket.sendTXT("42" + jsonMessage);
   
-  Serial.println("RFID enviado para admin!");
+  // Enviar a mensagem
+  if (webSocket.sendTXT("42" + jsonMessage)) {
+    Serial.println("RFID enviado para admin!");
+  } else {
+    Serial.println("Falha ao enviar RFID via WebSocket!");
+  }
   
   digitalWrite(LED_VERDE, HIGH);
   digitalWrite(LED_VERMELHO, LOW);
@@ -1030,9 +1067,17 @@ void enviarRFIDViaWebSocket(String rfidTag) {
     Serial.println("RFID reenviado para garantir recebimento no cadastro");
     delay(500);
     webSocket.sendTXT("42" + jsonMessage);  // Terceira tentativa
+    
+    // Não sair do modo administrativo após enviar, permitir múltiplas leituras
+    // O timeout ainda está ativo para encerrar eventualmente
+    adminModeStartTime = millis();  // Reiniciar o timeout
+    
+    // Manter LEDs indicando que ainda está em modo de leitura
+    piscarLed(LED_VERDE, 2, 200);
+  } else {
+    // Para outros modos, seguir comportamento normal
+    delay(1000);
   }
-  
-  delay(1000);
 }
 
 String lerUIDCartao() {
