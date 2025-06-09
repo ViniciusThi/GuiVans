@@ -4,6 +4,7 @@
 #include <SPI.h>
 #include <MFRC522.h>
 #include <WebSocketsClient_Generic.h>
+#include "driver/ledc.h"  // Biblioteca para PWM do ESP32
 
 // Configurações de Hardware
 #define SS_PIN 21
@@ -1016,30 +1017,46 @@ void processarRespostaServidor(String response) {
   digitalWrite(LED_VERMELHO, HIGH);
 }
 
-// Configuração do canal PWM para o buzzer
-#define BUZZER_CHANNEL 0
-#define BUZZER_FREQ 2000
-#define BUZZER_RESOLUTION 8
-
 void tocarBuzzer(int vezes, int duracao) {
-  // Configurar o canal PWM para o buzzer
-  ledcSetup(BUZZER_CHANNEL, BUZZER_FREQ, BUZZER_RESOLUTION);
-  ledcAttachPin(BUZZER, BUZZER_CHANNEL);
+  // Configurar timer e canal PWM
+  ledc_timer_config_t ledc_timer = {
+    .speed_mode = LEDC_HIGH_SPEED_MODE,
+    .duty_resolution = LEDC_TIMER_8_BIT,
+    .timer_num = LEDC_TIMER_0,
+    .freq_hz = 2000,
+    .clk_cfg = LEDC_AUTO_CLK
+  };
+  ledc_timer_config(&ledc_timer);
+
+  // Configurar canal
+  ledc_channel_config_t ledc_channel = {
+    .gpio_num = BUZZER,
+    .speed_mode = LEDC_HIGH_SPEED_MODE,
+    .channel = LEDC_CHANNEL_0,
+    .timer_sel = LEDC_TIMER_0,
+    .duty = 0,
+    .hpoint = 0
+  };
+  ledc_channel_config(&ledc_channel);
   
   for (int i = 0; i < vezes; i++) {
-    // Usar PWM com duty cycle máximo (255 para resolução de 8 bits)
-    ledcWrite(BUZZER_CHANNEL, 255);
+    // Volume máximo (255 para 8 bits)
+    ledc_set_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, 255);
+    ledc_update_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0);
     delay(duracao);
-    ledcWrite(BUZZER_CHANNEL, 0);
+    
+    // Desligar
+    ledc_set_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, 0);
+    ledc_update_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0);
+    
     if (i < vezes - 1) {
       delay(duracao / 2);
     }
   }
   
-  // Desconectar o canal PWM após o uso
-  ledcDetachPin(BUZZER);
-  pinMode(BUZZER, OUTPUT);
-  digitalWrite(BUZZER, LOW);
+  // Voltar para modo digital
+  gpio_set_direction(BUZZER, GPIO_MODE_OUTPUT);
+  gpio_set_level(BUZZER, 0);
 }
 
 void piscarLed(int led, int vezes, int duracao) {
