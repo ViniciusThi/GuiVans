@@ -27,16 +27,16 @@ const char* websocketPath = "/socket.io/?EIO=4&transport=websocket&device=esp32&
 // Timeouts e constantes
 #define WIFI_CONNECT_TIMEOUT 20000    // 20 segundos para timeout de conexão WiFi
 #define WIFI_RETRY_DELAY 5000         // 5 segundos entre tentativas de conexão WiFi
-#define MAX_WIFI_ATTEMPTS 3           // Número máximo de tentativas antes de reiniciar
+#define MAX_WIFI_ATTEMPTS 5           // Número máximo de tentativas antes de reiniciar (aumentado de 3 para 5)
 #define MAX_RESET_COUNT 5             // Número máximo de resets consecutivos
 #define SAFE_MODE_DURATION 300000     // 5 minutos em modo seguro
 
 // Parâmetros de conexão - variáveis para ajuste dinâmico
-unsigned long PING_INTERVAL = 5000;   // 5 segundos entre pings (pode ser ajustado pelo servidor)
-const unsigned long RECONNECT_DELAY = 3000;    // 3 segundos entre tentativas de reconexão
-const int MAX_RECONNECT_ATTEMPTS = 15;         // Máximo de tentativas antes de reiniciar WiFi
-const unsigned long WIFI_RECONNECT_TIMEOUT = 30000; // 30 segundos entre tentativas de reconexão WiFi
-const unsigned long IDENTIFICACAO_INTERVAL = 30000; // 30 segundos entre envios de identificação
+unsigned long PING_INTERVAL = 3000;   // 3 segundos entre pings (reduzido de 5s para 3s)
+const unsigned long RECONNECT_DELAY = 2000;    // 2 segundos entre tentativas de reconexão (reduzido de 3s para 2s)
+const int MAX_RECONNECT_ATTEMPTS = 20;         // Máximo de tentativas antes de reiniciar WiFi (aumentado de 15 para 20)
+const unsigned long WIFI_RECONNECT_TIMEOUT = 15000; // 15 segundos entre tentativas de reconexão WiFi (reduzido de 30s para 15s)
+const unsigned long IDENTIFICACAO_INTERVAL = 20000; // 20 segundos entre envios de identificação (reduzido de 30s para 20s)
 
 // ID único do ESP32
 const String ESP32_ID = "ESP32";
@@ -512,9 +512,9 @@ void configurarWebSocket() {
   path += millis() / 1000;
   
   // Configurações mais robustas para o WebSocket
-  webSocket.setExtraHeaders("User-Agent: TransControl ESP32/2.1\r\nOrigin: http://esp32.local");
-  webSocket.setReconnectInterval(1000);  // 1 segundo (era 3s)
-  webSocket.enableHeartbeat(25000, 3000, 2); // 25 segundos entre heartbeats (3s timeout, 2 tentativas)
+  webSocket.setExtraHeaders("User-Agent: TransControl ESP32/2.2\r\nOrigin: http://esp32.local");
+  webSocket.setReconnectInterval(500);  // 500ms (era 1s) - Reconectar mais rápido
+  webSocket.enableHeartbeat(15000, 2000, 3); // 15 segundos entre heartbeats (2s timeout, 3 tentativas) - Mais agressivo
   
   // Usar Socket.IO v4 com configurações para garantir estabilidade
   Serial.printf("Conectando ao servidor WebSocket: %s:%d%s\n", websocketHost, websocketPort, path.c_str());
@@ -675,7 +675,7 @@ void verificarConexaoWebSocket() {
       
       // Fechar qualquer conexão pendente
       webSocket.disconnect();
-      delay(500);
+      delay(300); // Reduzido de 500ms para 300ms
       
       // Construir caminho com o ID único e parâmetros adicionais
       String path = String(websocketPath);
@@ -684,6 +684,8 @@ void verificarConexaoWebSocket() {
       path += WiFi.RSSI();
       path += "&reconnect=";
       path += reconnectAttempts;
+      path += "&random=";
+      path += millis(); // Adicionar timestamp para evitar cache
       
       // Iniciar nova conexão
       webSocket.beginSocketIO(websocketHost, websocketPort, path.c_str());
@@ -726,7 +728,7 @@ void enviarIdentificacaoESP32() {
   message += ESP32_ID;
   message += "\",\"type\":\"esp32_connected\",\"timestamp\":";
   message += millis();
-  message += ",\"version\":\"2.1\",\"ip\":\"";
+  message += ",\"version\":\"2.2\",\"ip\":\"";
   message += WiFi.localIP().toString();
   message += "\",\"rssi\":";
   message += WiFi.RSSI();
@@ -740,7 +742,9 @@ void enviarIdentificacaoESP32() {
   message += ESP.getFreeHeap();
   message += ",\"reconnects\":";
   message += reconnectAttempts;
-  message += "}]";
+  message += ",\"clientTime\":\"";
+  message += String(millis());
+  message += "\"}]";
   
   webSocket.sendTXT(message);
   
@@ -947,7 +951,8 @@ void processarRFID(String rfidTag) {
   DynamicJsonDocument doc(1024);
   doc["rfidTag"] = rfidTag;
   doc["esp32Id"] = ESP32_ID;
-  doc["tipo"] = "entrada";
+  // Não definir tipo fixo, deixar o servidor decidir
+  // O servidor determinará se é entrada ou saída com base no último registro
   doc["timestamp"] = millis();
   
   String jsonString;
