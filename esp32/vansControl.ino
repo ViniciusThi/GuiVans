@@ -18,8 +18,8 @@ RTC_DATA_ATTR int rtcWiFiFailCount = 0;
 RTC_DATA_ATTR char rtcLastAdminCommand[50] = ""; // Armazenar último comando administrativo
 
 // Configurações de Rede
-const char* ssid = "Gui";
-const char* password = "gui123@456";
+const char* ssid = "Thi";
+const char* password = "thi08012";
 const char* serverURL = "http://54.233.146.9:3000";
 const char* websocketHost = "54.233.146.9";
 const int websocketPort = 3000;
@@ -285,81 +285,47 @@ void loop() {
   }
   
   // Verificar cartão RFID
-  if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) {
-    // Indicação visual baseada no status
-    if (adminReadingMode) {
-      // LED verde piscando no modo admin
-      static unsigned long lastBlink = 0;
-      if (currentMillis - lastBlink > 500) {
+  String uid = lerUIDCartao();
+  if (uid.length() > 0) {
+    unsigned long now = millis();
+    if (now - lastCardRead > DEBOUNCE_TIME) {
+      lastCardRead = now;
+      processarRFID(uid);
+    } else {
+      Serial.println("Debounce: ignorando leitura repetida");
+    }
+  }
+  
+  // Indicação visual baseada no status
+  if (adminReadingMode) {
+    // LED verde piscando no modo admin
+    static unsigned long lastBlink = 0;
+    if (currentMillis - lastBlink > 500) {
+      digitalWrite(LED_VERDE, !digitalRead(LED_VERDE));
+      lastBlink = currentMillis;
+    }
+    digitalWrite(LED_VERMELHO, LOW);
+  } else {
+    // LED de acordo com o status das conexões
+    if (websocketConnected) {
+      // Verde fixo indica WebSocket conectado
+      digitalWrite(LED_VERDE, HIGH);
+      digitalWrite(LED_VERMELHO, LOW);
+    } else if (wifiConnected) {
+      // Verde piscando lento indica WiFi conectado mas WebSocket desconectado
+      static unsigned long lastWsBlinkTime = 0;
+      if (currentMillis - lastWsBlinkTime > 1000) {
         digitalWrite(LED_VERDE, !digitalRead(LED_VERDE));
-        lastBlink = currentMillis;
+        lastWsBlinkTime = currentMillis;
       }
       digitalWrite(LED_VERMELHO, LOW);
     } else {
-      // LED de acordo com o status das conexões
-      if (websocketConnected) {
-        // Verde fixo indica WebSocket conectado
-        digitalWrite(LED_VERDE, HIGH);
-        digitalWrite(LED_VERMELHO, LOW);
-      } else if (wifiConnected) {
-        // Verde piscando lento indica WiFi conectado mas WebSocket desconectado
-        static unsigned long lastWsBlinkTime = 0;
-        if (currentMillis - lastWsBlinkTime > 1000) {
-          digitalWrite(LED_VERDE, !digitalRead(LED_VERDE));
-          lastWsBlinkTime = currentMillis;
-        }
-        digitalWrite(LED_VERMELHO, LOW);
-      } else {
-        // Vermelho fixo indica problema de conexão
-        digitalWrite(LED_VERMELHO, HIGH);
-        digitalWrite(LED_VERDE, LOW);
-      }
+      // Vermelho fixo indica problema de conexão
+      digitalWrite(LED_VERMELHO, HIGH);
+      digitalWrite(LED_VERDE, LOW);
     }
-    delay(50); // Reduzir delay para verificar a conexão mais frequentemente
-    return;
   }
-  
-  // Debounce
-  if (millis() - lastCardRead < DEBOUNCE_TIME) {
-    return;
-  }
-  
-  lastCardRead = millis();
-  String rfidTag = lerUIDCartao();
-  
-  Serial.print("RFID detectado: ");
-  Serial.println(rfidTag);
-  Serial.print("Modo: ");
-  Serial.println(adminReadingMode ? "Administrativo" : "Normal");
-  Serial.print("Tipo admin: ");
-  Serial.println(adminModeType);
-  
-  // Piscar LED para indicar leitura
-  piscarLed(LED_VERDE, 3, 100);
-  
-  // Resolver problema de modo administrativo - verificar explicitamente se estamos em modo administrativo
-  if (adminReadingMode) {
-    // Modo administrativo - enviar via WebSocket
-    Serial.println("Modo administrativo detectado. Enviando via WebSocket...");
-    enviarRFIDViaWebSocket(rfidTag);
-    
-    // NÃO sair do modo administrativo automaticamente se for modo de cadastro
-    if (adminModeType != "cadastroAluno") {
-      sairModoAdministrativo();
-    } else {
-      Serial.println("Permanecendo em modo de cadastro para leituras adicionais");
-      // Reiniciar timer para evitar timeout muito rápido
-      adminModeStartTime = millis();
-    }
-  } else {
-    // Modo normal - processar via HTTP
-    Serial.println("Modo normal detectado. Processando via HTTP...");
-    processarRFID(rfidTag);
-  }
-  
-  rfid.PICC_HaltA();
-  rfid.PCD_StopCrypto1();
-  delay(500);
+  delay(50); // Reduzir delay para verificar a conexão mais frequentemente
 }
 
 bool tentarConectarWiFi() {
@@ -1014,8 +980,8 @@ void entrarModoAdministrativo(String tipo) {
     webSocket.sendTXT("42" + jsonMessage);
   } else {
     // Feedback padrão
-    piscarLed(LED_VERDE, 5, 100);
-    tocarBuzzer(3, 100);
+  piscarLed(LED_VERDE, 5, 100);
+  tocarBuzzer(3, 100);
   }
 }
 
@@ -1030,7 +996,7 @@ void sairModoAdministrativo() {
     digitalWrite(LED_VERDE, HIGH);
     digitalWrite(LED_VERMELHO, LOW);
   } else {
-    digitalWrite(LED_VERMELHO, HIGH);
+  digitalWrite(LED_VERMELHO, HIGH);
   }
   tocarBuzzer(1, 200);
 }
@@ -1046,7 +1012,7 @@ void enviarRFIDViaWebSocket(String rfidTag) {
     }
     
     // Tentar reconectar WebSocket se necessário
-    if (!websocketConnected) {
+  if (!websocketConnected) {
       Serial.println("Reconectando WebSocket para enviar RFID de cadastro");
       configurarWebSocket();
       delay(1000);
@@ -1061,8 +1027,8 @@ void enviarRFIDViaWebSocket(String rfidTag) {
     // Tentar enviar mesmo sem confirmação de conexão (se WiFi estiver conectado)
     if (WiFi.status() != WL_CONNECTED) {
       Serial.println("WiFi não conectado, impossível enviar RFID");
-      tocarBuzzer(3, 100);
-      return;
+    tocarBuzzer(3, 100);
+    return;
     }
   }
   
@@ -1088,7 +1054,7 @@ void enviarRFIDViaWebSocket(String rfidTag) {
   
   // Enviar a mensagem
   if (webSocket.sendTXT("42" + jsonMessage)) {
-    Serial.println("RFID enviado para admin!");
+  Serial.println("RFID enviado para admin!");
   } else {
     Serial.println("Falha ao enviar RFID via WebSocket!");
   }
@@ -1118,49 +1084,114 @@ void enviarRFIDViaWebSocket(String rfidTag) {
 }
 
 String lerUIDCartao() {
-  String uid = "";
+  if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) {
+    return "";
+  }
+
+  Serial.println("Cartão detectado!");
+  
+  String uidString = "";
   for (byte i = 0; i < rfid.uid.size; i++) {
     if (rfid.uid.uidByte[i] < 0x10) {
-      uid += "0";
+      uidString += "0";
     }
-    uid += String(rfid.uid.uidByte[i], HEX);
+    uidString += String(rfid.uid.uidByte[i], HEX);
   }
-  uid.toUpperCase();
-  return uid;
+  uidString.toUpperCase();
+  
+  Serial.print("UID do cartão: ");
+  Serial.println(uidString);
+
+  // Halt PICC
+  rfid.PICC_HaltA();
+  // Stop encryption on PCD
+  rfid.PCD_StopCrypto1();
+
+  return uidString;
 }
 
 void processarRFID(String rfidTag) {
-  Serial.println("Enviando RFID para servidor...");
+  if (adminReadingMode) {
+    enviarRFIDViaWebSocket(rfidTag);
+    return;
+  }
+
+  Serial.println("Enviando RFID para o servidor: " + rfidTag);
+
+  // Preparar URL
+  String url = String(serverURL) + "/api/registros/rfid";
   
-  DynamicJsonDocument doc(1024);
+  // Preparar JSON
+  StaticJsonDocument<200> doc;
   doc["rfidTag"] = rfidTag;
   doc["esp32Id"] = ESP32_ID;
-  // Não definir tipo fixo, deixar o servidor decidir
-  // O servidor determinará se é entrada ou saída com base no último registro
-  doc["timestamp"] = millis();
   
+  // Adicionar localização se disponível (mock por enquanto)
+  JsonObject localizacao = doc.createNestedObject("localizacao");
+  localizacao["latitude"] = -22.7468;  // Exemplo
+  localizacao["longitude"] = -47.6156;  // Exemplo
+
   String jsonString;
   serializeJson(doc, jsonString);
-  
-  http.begin(String(serverURL) + "/api/registros/rfid");
+
+  Serial.println("Dados a serem enviados: " + jsonString);
+
+  // Configurar requisição HTTP
+  http.begin(url);
   http.addHeader("Content-Type", "application/json");
   
-  int httpCode = http.POST(jsonString);
+  // Enviar requisição
+  int httpResponseCode = http.POST(jsonString);
   
-  if (httpCode > 0) {
+  Serial.print("Código de resposta HTTP: ");
+  Serial.println(httpResponseCode);
+
+  if (httpResponseCode > 0) {
     String response = http.getString();
-    Serial.print("Resposta (");
-    Serial.print(httpCode);
-    Serial.print("): ");
-    Serial.println(response);
+    Serial.println("Resposta do servidor: " + response);
     
-    processarRespostaServidor(response);
+    // Processar resposta
+    DynamicJsonDocument respDoc(1024);
+    DeserializationError error = deserializeJson(respDoc, response);
+    
+    if (!error) {
+      const char* status = respDoc["status"];
+      const char* message = respDoc["message"];
+      const char* ledColor = respDoc["ledColor"];
+      bool buzzer = respDoc["buzzer"];
+      
+      Serial.print("Status: ");
+      Serial.println(status);
+      Serial.print("Mensagem: ");
+      Serial.println(message);
+      
+      // Acionar LED apropriado
+      if (strcmp(ledColor, "green") == 0) {
+        digitalWrite(LED_VERDE, HIGH);
+        digitalWrite(LED_VERMELHO, LOW);
+        delay(1000);
+        digitalWrite(LED_VERDE, LOW);
+      } else {
+        digitalWrite(LED_VERMELHO, HIGH);
+        digitalWrite(LED_VERDE, LOW);
+        delay(1000);
+        digitalWrite(LED_VERMELHO, LOW);
+      }
+      
+      // Acionar buzzer se necessário
+      if (buzzer) {
+        tocarBuzzer(1, 200);
+      }
+    } else {
+      Serial.println("Erro ao processar resposta JSON");
+      piscarLed(LED_VERMELHO, 3, 200);
+      tocarBuzzer(3, 200);
+    }
   } else {
-    Serial.print("Erro HTTP: ");
-    Serial.println(httpCode);
-    digitalWrite(LED_VERMELHO, HIGH);
-    digitalWrite(LED_VERDE, LOW);
-    tocarBuzzer(3, 100);
+    Serial.print("Erro na requisição HTTP: ");
+    Serial.println(httpResponseCode);
+    piscarLed(LED_VERMELHO, 3, 200);
+    tocarBuzzer(3, 200);
   }
   
   http.end();
